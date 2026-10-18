@@ -610,6 +610,23 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
 #endif
 }
 
+// 780M perf: A prefetch/store helpers for the pipelined PQ2_0 coopmat1 path
+#if defined(DATA_A_PQ2_0) && defined(COOPMAT) && !defined(MUL_MAT_ID)
+void prefetch_a_pq2_0(const uint pos_a, const uint row, const uint col, out uint bits, out FLOAT_TYPE d) {
+    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+    const uint ib = idx / 32;
+    const uint iqs = idx & 0x1fu;
+    bits = uint(data_a[ib].qs[iqs]);
+    d = FLOAT_TYPE(data_a[ib].d);
+}
+
+void store_a_pq2_0(const uint row, const uint col, const uint bits, const FLOAT_TYPE d) {
+    const uint k_pair = row * LOAD_VEC_A / 2;
+    store_a(col, k_pair,     d * (FLOAT_TYPEV2(bits & 3u, (bits >> 2u) & 3u) - FLOAT_TYPEV2(1.0f)));
+    store_a(col, k_pair + 1, d * (FLOAT_TYPEV2((bits >> 4u) & 3u, bits >> 6u) - FLOAT_TYPEV2(1.0f)));
+}
+#endif
+
 #if !defined(MUL_MAT_ID)
 void load_b_to_shmem(const uint pos_b, const uint row, const uint col, const uint idx_n, const uint block, const uint end_k) {
 #if LOAD_VEC_B == 8

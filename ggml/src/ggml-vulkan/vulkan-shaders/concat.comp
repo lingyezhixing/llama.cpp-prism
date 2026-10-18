@@ -5,9 +5,66 @@
 
 layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
 
+#ifdef CONCAT_UNIT32
+// 780M perf: fused transpose-copy. When src1 of a dim-0 concat is a 2D transpose view
+// (nb10 == ne11, nb11 == 1), copy it through a 32x33 LDS tile so both the global reads
+// and the writes stay coalesced, instead of materializing the transpose first.
+shared uint ctile[32 * 33];
+#endif
+
 void main() {
-    const uint idx = gl_GlobalInvocationID.z * 262144 + gl_GlobalInvocationID.y * 512 + gl_GlobalInvocationID.x;
     const int dim = p.param3;
+
+#ifdef CONCAT_UNIT32
+    if (dim == 0 && p.nb11 == 1u && p.nb10 == p.ne11 && p.nb10 >= 32u &&
+        p.ne12 == 1u && p.ne13 == 1u && p.ne02 == 1u && p.ne03 == 1u &&
+        p.nb00 == 1u && p.nb20 == 1u) {
+        const uint lid = gl_LocalInvocationID.x;   // 0..511
+        const uint nx  = p.ne10;                   // src1 rows (tokens)
+        const uint C   = p.ne11;                   // channels
+        const uint n0  = p.ne00;                   // src0 rows
+        const uint T   = p.ne20;                   // dst rows
+        const uint ct  = gl_WorkGroupID.x;         // channel tile
+        const uint tt  = gl_WorkGroupID.y;         // token tile
+
+        {
+            const uint c_l = lid & 31u;
+            const uint t16 = lid >> 5u;
+            const uint c = ct * 32u + c_l;
+            [[unroll]] for (uint j = 0u; j < 2u; j++) {
+                const uint t = tt * 32u + t16 + j * 16u;
+                uint v = 0u;
+                if (t < T && c < C) {
+                    if (t < n0) {
+                        v = data_a[get_aoffset() + t * p.nb00 + c * p.nb01];
+                    } else {
+                        const uint ti = t - n0;
+                        if (ti < nx) {
+                            v = data_b[get_boffset() + ti * p.nb10 + c];
+                        }
+                    }
+                }
+                ctile[c_l * 33u + t16 + j * 16u] = v;
+            }
+        }
+        barrier();
+        {
+            const uint t_l = lid & 31u;
+            const uint c16 = lid >> 5u;
+            const uint t = tt * 32u + t_l;
+            [[unroll]] for (uint j = 0u; j < 2u; j++) {
+                const uint c = ct * 32u + c16 + j * 16u;
+                const uint v = ctile[(c16 + j * 16u) * 33u + t_l];
+                if (t < T && c < C) {
+                    data_d[get_doffset() + t * p.nb20 + c * p.nb21] = v;
+                }
+            }
+        }
+        return;
+    }
+#endif
+
+    const uint idx = gl_GlobalInvocationID.z * 262144 + gl_GlobalInvocationID.y * 512 + gl_GlobalInvocationID.x;
 
     if (idx >= p.ne) {
         return;

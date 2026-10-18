@@ -30,13 +30,21 @@ layout (binding = 6) readonly buffer R_I {uvec2 rope_data_i[];}; // indices for 
 #endif
 
 #extension GL_EXT_control_flow_attributes : enable
-#define BLOCK_SIZE 512
 
 layout (constant_id = 1) const bool do_multiply = false;
+// allow short rows to use a smaller workgroup (a variant is compiled per size)
+#ifndef BLOCK_SIZE
+#define BLOCK_SIZE 512
+#endif
 
 layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
 
 shared FLOAT_TYPE sumsh[BLOCK_SIZE];
+// 780M perf: cache the row (f32) in shared memory during the sum pass so the multiply
+// pass does not read it from global again (halves the DRAM read traffic). Rows wider
+// than RMS_CACHE_ITERS blocks keep the re-read path.
+#define RMS_CACHE_ITERS 6
+shared float rowsh[BLOCK_SIZE * RMS_CACHE_ITERS];
 
 void rms_norm(uint num_iters) {
     const uint ncols     = p.ne00;
@@ -62,18 +70,31 @@ void rms_norm(uint num_iters) {
 #endif
     FLOAT_TYPE sum = FLOAT_TYPE(0.0f); // partial sum for thread in warp
 
-    [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
-        FLOAT_TYPE xi = FLOAT_TYPE(0);
-        if (col < ncols) {
-            xi = FLOAT_TYPE(data_a[a_offset + col]);
+    const bool cache_row = (ncols <= BLOCK_SIZE * RMS_CACHE_ITERS);
+
+    if (cache_row) {
+        [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
+            FLOAT_TYPE xi = FLOAT_TYPE(0);
+            if (col < ncols) {
+                xi = FLOAT_TYPE(data_a[a_offset + col]);
+                rowsh[col] = data_a[a_offset + col];
+            }
+            sum += xi * xi;
         }
-        sum += xi * xi;
+    } else {
+        [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
+            FLOAT_TYPE xi = FLOAT_TYPE(0);
+            if (col < ncols) {
+                xi = FLOAT_TYPE(data_a[a_offset + col]);
+            }
+            sum += xi * xi;
+        }
     }
 
     sumsh[tid] = sum;
     // sum up partial sums and write back result
     barrier();
-    [[unroll]] for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
+    [[unroll]] for (int s = int(BLOCK_SIZE) / 2; s > 0; s >>= 1) {
         if (tid < s) {
             sum += sumsh[tid + s];
             sumsh[tid] = sum;
@@ -91,14 +112,14 @@ void rms_norm(uint num_iters) {
                 if (col >= ncols) {
                     continue;
                 }
-                data_d[d_offset + col] = D_TYPE(scale * FLOAT_TYPE(data_a[a_offset + col]) * FLOAT_TYPE(data_b[b_offset + fastmod(col, p.ne10)]));
+                data_d[d_offset + col] = D_TYPE(scale * (cache_row ? FLOAT_TYPE(rowsh[col]) : FLOAT_TYPE(data_a[a_offset + col])) * FLOAT_TYPE(data_b[b_offset + fastmod(col, p.ne10)]));
             }
         } else {
             [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
                 if (col >= ncols) {
                     continue;
                 }
-                data_d[d_offset + col] = D_TYPE(scale * FLOAT_TYPE(data_a[a_offset + col]) * FLOAT_TYPE(data_b[b_offset + col]));
+                data_d[d_offset + col] = D_TYPE(scale * (cache_row ? FLOAT_TYPE(rowsh[col]) : FLOAT_TYPE(data_a[a_offset + col])) * FLOAT_TYPE(data_b[b_offset + col]));
             }
         }
     } else {
@@ -106,7 +127,7 @@ void rms_norm(uint num_iters) {
             if (col >= ncols) {
                 continue;
             }
-            data_d[d_offset + col] = D_TYPE(scale * FLOAT_TYPE(data_a[a_offset + col]));
+            data_d[d_offset + col] = D_TYPE(scale * (cache_row ? FLOAT_TYPE(rowsh[col]) : FLOAT_TYPE(data_a[a_offset + col])));
         }
     }
 #if RMS_NORM_ROPE_FUSION

@@ -287,7 +287,40 @@ void main() {
     }
 #endif
 
+#if defined(DATA_A_PQ2_0) && defined(COOPMAT) && !defined(MUL_MAT_ID)
+    // 780M perf: PQ2_0 coopmat1 path - the A strip is register-prefetched one block ahead
+    // (aligned path only; B is read straight into LDS to keep the VGPR count down).
+    const uint A_STEPS = BM / loadstride_a;
+    uint a_bits[A_STEPS];
+    FLOAT_TYPE a_d[A_STEPS];
+
+    if (ALIGNED != 0 && end_k > start_k) {
+        [[unroll]] for (uint s = 0; s < A_STEPS; s++) {
+            prefetch_a_pq2_0(pos_a, loadr_a, loadc_a + s * loadstride_a, a_bits[s], a_d[s]);
+        }
+    }
+#endif
+
     for (uint block = start_k; block < end_k; block += BK) {
+#if defined(DATA_A_PQ2_0) && defined(COOPMAT) && !defined(MUL_MAT_ID)
+        barrier();  // previous block's MMA must be finished before overwriting LDS
+
+        if (ALIGNED != 0) {
+            [[unroll]] for (uint s = 0; s < A_STEPS; s++) {
+                store_a_pq2_0(loadr_a, loadc_a + s * loadstride_a, a_bits[s], a_d[s]);
+            }
+            [[unroll]] for (uint l = 0; l < BN; l += loadstride_b) {
+                load_b_to_shmem(pos_b, loadr_b, loadc_b + l, ic * BN + loadc_b + l, block, end_k);
+            }
+        } else {
+            [[unroll]] for (uint l = 0; l < BM; l += loadstride_a) {
+                load_a_to_shmem(pos_a, loadr_a, loadc_a + l, ir * BM + loadc_a + l, block, end_k);
+            }
+            [[unroll]] for (uint l = 0; l < BN; l += loadstride_b) {
+                load_b_to_shmem(pos_b, loadr_b, loadc_b + l, ic * BN + loadc_b + l, block, end_k);
+            }
+        }
+#else
         [[unroll]] for (uint l = 0; l < BM; l += loadstride_a) {
             load_a_to_shmem(pos_a, loadr_a, loadc_a + l, ir * BM + loadc_a + l, block, end_k);
         }
@@ -298,13 +331,44 @@ void main() {
             load_b_to_shmem(pos_b, loadr_b, loadc_b + l, ic, _ne1, block, end_k);
 #endif
         }
+#endif
 
         barrier();
+
+#if defined(DATA_A_PQ2_0) && defined(COOPMAT) && !defined(MUL_MAT_ID)
+        if (ALIGNED != 0 && block + BK < end_k) {
+            // issue next block's A loads; latency is overlapped with the MMA below
+            const uint npos_a = pos_a + BK / LOAD_VEC_A_EFF;
+            [[unroll]] for (uint s = 0; s < A_STEPS; s++) {
+                prefetch_a_pq2_0(npos_a, loadr_a, loadc_a + s * loadstride_a, a_bits[s], a_d[s]);
+            }
+        }
+#endif
 
         pos_a += BK / LOAD_VEC_A_EFF;
         pos_b += BK / LOAD_VEC_B_EFF;
 
 #ifdef COOPMAT
+#if defined(DATA_A_PQ2_0) && !defined(MUL_MAT_ID)
+        // perf-780m: batch the k-step tile loads, then issue the MMAs
+        // (same accumulation order; only the load schedule differs)
+        coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a_arr[4];
+        coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> cache_b_arr[2];
+        [[unroll]] for (uint i = 0; i < BK; i += TK) {
+            [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
+                coopMatLoad(cache_a_arr[cm_row], buf_a, a_shmem_index(warp_r * WM + cm_row * TM, i / 2), a_shmem_stride(), gl_CooperativeMatrixLayoutRowMajor);
+            }
+            [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+                coopMatLoad(cache_b_arr[cm_col], buf_b, (warp_c * WN + cm_col * TN) * SHMEM_STRIDE + i / 2, SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+            }
+
+            [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
+                [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+                    sums[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_a_arr[cm_row], cache_b_arr[cm_col], sums[cm_col * cms_per_row + cm_row]);
+                }
+            }
+        }
+#else
         [[unroll]] for (uint i = 0; i < BK; i += TK) {
             [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
                 // Load from shared into cache
@@ -317,6 +381,7 @@ void main() {
                 }
             }
         }
+#endif
 #else
         [[unroll]] for (uint i = 0; i < BK / BK_STEP; i++) {
             // Load from shared into cache
@@ -354,7 +419,11 @@ void main() {
         }
 #endif
 
+#if defined(DATA_A_PQ2_0) && defined(COOPMAT) && !defined(MUL_MAT_ID)
+        // pipelined path: the leading barrier of the next iteration covers LDS reuse
+#else
         barrier();
+#endif
     }
 
 #if defined(ACC_TYPE_MAX)

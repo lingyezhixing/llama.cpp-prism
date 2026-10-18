@@ -4,7 +4,10 @@
 #include "types.glsl"
 
 #extension GL_EXT_control_flow_attributes : enable
+// allow short rows to use a smaller workgroup (a variant is compiled per size)
+#ifndef BLOCK_SIZE
 #define BLOCK_SIZE 512
+#endif
 
 layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
 
@@ -26,7 +29,7 @@ void main() {
 
     // sum up partial sums and write back result
     barrier();
-    [[unroll]] for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
+    [[unroll]] for (int s = int(BLOCK_SIZE) / 2; s > 0; s >>= 1) {
         if (tid < s) {
             sum[tid] += sum[tid + s];
         }

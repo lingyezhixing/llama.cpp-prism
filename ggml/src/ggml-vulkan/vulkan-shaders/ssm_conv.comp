@@ -23,10 +23,54 @@ layout(push_constant) uniform PushConstants {
     uint nc; uint ncs; uint nr; uint n_t; uint n_s;
 };
 
+// 780M perf: nc==4 path stages the x window in LDS with coalesced loads (the channel axis is
+// the wave's fast axis while x is [tokens, channels], so the direct path reads ~2KB-strided).
+// PITCH is odd so that the channel-major LDS reads are bank-conflict-free.
+#define WIN (TOKENS_PER_WG + 3)
+#define PITCH (WIN + 2)
+shared float xwin[BLOCK_SIZE * PITCH];
+
 void main() {
     const uint i1 = gl_GlobalInvocationID.x;
     const uint i2 = gl_WorkGroupID.y * TOKENS_PER_WG + gl_LocalInvocationID.y;
     const uint i3 = gl_WorkGroupID.z;
+
+    if (nc == 4) {
+        const uint c0 = gl_WorkGroupID.x * BLOCK_SIZE;
+        const uint t0 = gl_WorkGroupID.y * TOKENS_PER_WG;
+        const uint tid = gl_LocalInvocationID.y * BLOCK_SIZE + gl_LocalInvocationID.x;
+
+        for (uint elem = tid; elem < BLOCK_SIZE * WIN; elem += BLOCK_SIZE * TOKENS_PER_WG) {
+            const uint c = elem / WIN;
+            const uint tw = elem % WIN;
+            const bool valid = (c0 + c) < nr && (t0 + tw) < ncs;
+            xwin[c * PITCH + tw] = valid ? src0[(c0 + c) * (nb01 / 4) + (t0 + tw)] : 0.0;
+        }
+        barrier();
+
+        if (i1 >= nr || i2 >= n_t || i3 >= n_s) {
+            return;
+        }
+
+        const uint widx = (i1 - c0) * PITCH + (i2 - t0);
+        const uint src1_base = i1 * (nb11 / 4);
+
+        float sum = dot(
+            vec4(xwin[widx], xwin[widx + 1], xwin[widx + 2], xwin[widx + 3]),
+            vec4(src1[src1_base], src1[src1_base + 1], src1[src1_base + 2], src1[src1_base + 3])
+        );
+
+        if (APPLY_BIAS) {
+            sum += bias[i1];
+        }
+        if (APPLY_SILU) {
+            sum = sum / (1.0f + exp(-sum));
+        }
+
+        const uint dst_idx = i3 * (dst_nb2 / 4) + i2 * (dst_nb1 / 4) + i1;
+        dst[dst_idx] = sum;
+        return;
+    }
 
     if (i1 >= nr || i2 >= n_t || i3 >= n_s) {
         return;
@@ -36,16 +80,8 @@ void main() {
     const uint src1_base = i1 * (nb11 / 4);
 
     float sum = 0.0;
-
-    if (nc == 4) {
-        sum = dot(
-            vec4(src0[src0_base], src0[src0_base + 1], src0[src0_base + 2], src0[src0_base + 3]),
-            vec4(src1[src1_base], src1[src1_base + 1], src1[src1_base + 2], src1[src1_base + 3])
-        );
-    } else {
-        [[unroll]] for (uint i0 = 0; i0 < nc; i0++) {
-            sum += src0[src0_base + i0] * src1[src1_base + i0];
-        }
+    [[unroll]] for (uint i0 = 0; i0 < nc; i0++) {
+        sum += src0[src0_base + i0] * src1[src1_base + i0];
     }
 
     if (APPLY_BIAS) {
