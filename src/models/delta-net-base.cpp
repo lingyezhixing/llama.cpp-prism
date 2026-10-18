@@ -474,6 +474,8 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
     qkv_mixed = ggml_transpose(ctx0, qkv_mixed);
     cb(qkv_mixed, "qkv_mixed_transposed", il);
 
+    // Kept as a transpose view: the vulkan concat has a fused transpose-copy path for
+    // exactly this pattern (src1 = 2D transpose view), which avoids materializing it.
     ggml_tensor * conv_input = ggml_concat(ctx0, conv_states, qkv_mixed, 0);
     cb(conv_input, "conv_input", il);
 
