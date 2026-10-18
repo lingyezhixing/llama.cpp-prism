@@ -153,3 +153,7 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+# perf-780m: keep perf tooling bat files
+!perf-780m/scripts/*.bat
+

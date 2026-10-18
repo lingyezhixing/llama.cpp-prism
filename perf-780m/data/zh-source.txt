@@ -1,0 +1,11 @@
+现代计算机的性能优化，往往不是一件凭直觉就能完成的事情。人们习惯性地认为，把算法从 O(n^2) 改进到 O(n log n) 就万事大吉，但在真实的硬件上，缓存层次、指令发射宽度、内存带宽和功耗墙共同决定了最终速度。一个在纸面上减少了一半运算量的改进，放到 GPU 上可能因为访存模式变差而变得更慢；反过来，一个看起来"多算了一点"的融合算子，却可能因为省下了一次往返显存而快出可观的一截。
+
+在图形处理器上工作的人，很快就学会了对数字保持谦逊。同一个程序，在同一台机器上，仅仅因为运行时机器是刚从睡眠中唤醒，还是已经满负荷运转了十分钟，测出来的吞吐就可能相差百分之三十以上。功率管理策略、散热状态、电源适配器的接入与否，甚至别的进程占用了多少内存带宽，都会在测量结果里留下痕迹。因此，严肃的性能工程里，对照组永远比绝对值重要：先把两个版本放进同一个实验里交替运行，才谈得上谁快谁慢。
+
+Three kinds of work dominate a modern inference engine. First, the matrix multiplications, which map almost perfectly onto whatever matrix hardware the GPU exposes. Second, the elementwise and normalization operations, which are trivially parallel but easy to leave inefficient because each one launches its own kernel. Third, the structured transforms and state updates that come from the model architecture itself -- convolutions for state-space models, rotary embeddings, and Hadamard rotations used to spread quantization error more evenly across channels.
+
+The hardest part of optimizing the second and third kinds is not writing faster code for any single operation. It is noticing which operations exist at all, and which of them are worth fusing together. A profiler that lists per-operation times is a map, not the territory; the territory is the dependency graph, and the wins hide in its edges. When two consecutive operations produce and consume a tensor that fits comfortably in on-chip memory, merging them removes a round trip to DRAM, and DRAM is usually the scarcer resource.
+
+量化把权重的表示压缩到两比特甚至更少，同时也把计算模式从"直接乘加"变成了"先解包再乘加"。解包本身只值几个位运算，但它会占用发射槽，和矩阵单元的吞吐竞争。设计得好的内核，会让解包躲在矩阵运算的阴影里；设计得差的内核，则会发现自己大部分时间都在等待解包完成的标量指令。这两种内核在外行看来运行着同一个模型，输出着同样的文字，但速度可以差出一倍有余。
+
+经验往往来自失败的实验。一个看起来必然成立的访存优化，可能因为发出更多的缓存行事务而适得其反；一个被精心调整过的分块尺寸，换一个批次大小就完全不再最优。所以真正可靠的流程是：先建立可信的测量基线与对照协议，再提出可以被证伪的假设，然后一次只改一个变量。任何没有对照的数字，都只是传闻。

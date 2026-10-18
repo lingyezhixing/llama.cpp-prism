@@ -1,0 +1,7 @@
+# correctness prompts - one per line; lines starting with # are skipped
+The three most important factors when training a small language model are
+1 + 1 = 2, 2 + 2 = 4, 4 + 4 = 8, 8 + 8 =
+用三句话解释一下为什么 GPU 适合做矩阵乘法：
+场景：用户提供了一段购物退款客服对话，需要给这段对话起一个不超过八个字的标题。对话开头是"我上周买的鞋子尺码不对想退换"。请直接给出标题：
+def merge_sorted(a, b):
+    """Merge two sorted lists into one sorted list."""
