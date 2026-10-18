@@ -3,7 +3,7 @@ rem build-vk.bat <build-name> <mirror|lean|debug>
 rem mirror: CI-parity flags (minus BoringSSL). lean: fast iteration flags. debug: lean + GGML_VULKAN_DEBUG=ON.
 rem Output: D:\LLM\Backend\builds\<build-name>
 setlocal
-set WT=C:\Users\31940\.local\share\opencode\worktree\05b616\780m-pq2
+set WT=D:\LLM\Backend\src\llama.cpp-prism
 set VULKAN_SDK=E:\Program files\DevTools\VulkanSDK\1.4.313.2
 if "%~1"=="" ( echo usage: build-vk.bat ^<build-name^> ^<mirror^|lean^|debug^> & exit /b 2 )
 set OUT=D:\LLM\Backend\builds\%~1
